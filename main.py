@@ -1,8 +1,7 @@
-python
 import os
 import logging
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, ConversationHandler, CallbackContext
 
 # Настройка логирования
 logging.basicConfig(
@@ -28,45 +27,48 @@ logger.info("✅ Переменные окружения загружены")
 # Хранение временных данных
 user_data = {}
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def start_command(update: Update, context: CallbackContext):
     """Начало работы - просим фото"""
     welcome_text = """
 🛒 Покупка бытовой техники. 
 🔄 Возможен Trade-in.
 
-Присылайте фото бытовой техники, шильдика и описание неисправности - администратор свяжется с вами!
+Присылайте фото и описание неисправности - администратор обязательно даст обратную связь!
 
-📸 Теперь отправьте фотографию:
+📸 Теперь отправь мне фотографию техники:
     """
     
-    await update.message.reply_text(welcome_text)
+    update.message.reply_text(welcome_text)
     return PHOTO
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_photo(update: Update, context: CallbackContext):
     """Обработка полученного фото"""
     user_id = update.message.from_user.id
     
     try:
         # Сохраняем фото (берем самое качественное)
-        photo_file = await update.message.photo[-1].get_file()
+        photo_file = update.message.photo[-1].get_file()
         user_data[user_id] = {'photo': photo_file}
         
-        await update.message.reply_text(
-            "✅ Фото получено! Теперь опишите неисправность или укажите модель, если не отправили шильдик:\n\n"
-                   )
+        update.message.reply_text(
+            "✅ Фото получено! Теперь опиши неисправность техники:\n\n"
+            "• Какая модель?\n"
+            "• Что случилось?\n"
+            "• Какие симптомы?"
+        )
         return DESCRIPTION
     except Exception as e:
         logger.error(f"Ошибка обработки фото: {e}")
-        await update.message.reply_text("❌ Ошибка при обработке фото. Попробуйте еще раз: /start")
+        update.message.reply_text("❌ Ошибка при обработке фото. Попробуйте еще раз: /start")
         return ConversationHandler.END
 
-async def handle_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_description(update: Update, context: CallbackContext):
     """Обработка описания и отправка данных администратору"""
     user_id = update.message.from_user.id
     description = update.message.text
     
     if user_id not in user_data or 'photo' not in user_data[user_id]:
-        await update.message.reply_text("❌ Сначала отправь фото! Напиши /start")
+        update.message.reply_text("❌ Сначала отправь фото! Напиши /start")
         return ConversationHandler.END
     
     # Сохраняем описание и информацию о пользователе
@@ -76,17 +78,17 @@ async def handle_description(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     try:
         # Отправляем данные администратору в Telegram
-        await send_to_admin(update, context, user_id)
+        send_to_admin(update, context, user_id)
         
-        await update.message.reply_text(
+        update.message.reply_text(
             "✅ Спасибо! Ваши фото и описание отправлены администратору! 🎉\n\n"
-            "Мы свяжемся с вами в ближайшее время.\n\n"
+            "Мы свяжемся с вами в ближайшее время для обратной связи.\n\n"
             "Если хотите отправить еще одну заявку, напишите /start"
         )
         
     except Exception as e:
         logger.error(f"Ошибка отправки: {e}")
-        await update.message.reply_text(
+        update.message.reply_text(
             "❌ Произошла ошибка при отправке. Попробуйте еще раз: /start"
         )
     
@@ -96,7 +98,7 @@ async def handle_description(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     return ConversationHandler.END
 
-async def send_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+def send_to_admin(update: Update, context: CallbackContext, user_id: int):
     """Отправка данных администратору в Telegram"""
     user_info = user_data[user_id]
     
@@ -109,16 +111,17 @@ async def send_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, user
 📝 Описание неисправности: 
 {user_info['description']}
 
+Фото техники ниже 👇
     """
     
     try:
         # Скачиваем фото
         photo_path = f"temp_photo_{user_id}.jpg"
-        await user_info['photo'].download_to_drive(photo_path)
+        user_info['photo'].download(photo_path)
         
         # Отправляем фото и текст администратору
         with open(photo_path, 'rb') as photo:
-            await context.bot.send_photo(
+            context.bot.send_photo(
                 chat_id=int(ADMIN_CHAT_ID),
                 photo=photo,
                 caption=message_text
@@ -131,24 +134,24 @@ async def send_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, user
     except Exception as e:
         logger.error(f"Ошибка отправки фото: {e}")
         # Отправляем хотя бы текст если фото не отправилось
-        await context.bot.send_message(
+        context.bot.send_message(
             chat_id=int(ADMIN_CHAT_ID),
             text=message_text + "\n\n❌ Не удалось отправить фото"
         )
 
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def cancel_command(update: Update, context: CallbackContext):
     """Отмена операции"""
     user_id = update.message.from_user.id
     if user_id in user_data:
         del user_data[user_id]
     
-    await update.message.reply_text(
+    update.message.reply_text(
         "❌ Заявка отменена.\n\n"
         "Если хотите оставить заявку на покупку техники, напишите /start"
     )
     return ConversationHandler.END
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def help_command(update: Update, context: CallbackContext):
     """Команда помощи"""
     help_text = """
 🤖 Помощь по боту:
@@ -162,24 +165,25 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Как это работает:
 1. Отправляете фото техники
 2. Описываете неисправность
-3. Администратор связывается с вами
+3. Администратор связывается с вами для оценки и обратной связи
     """
-    await update.message.reply_text(help_text)
+    update.message.reply_text(help_text)
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def error_handler(update: Update, context: CallbackContext):
     """Обработчик ошибок"""
     logger.error(f"Ошибка: {context.error}")
 
 def main():
-    # Создаем приложение
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Создаем updater
+    updater = Updater(token=BOT_TOKEN, use_context=True)
+    dispatcher = updater.dispatcher
     
     # Создаем обработчик разговора
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start_command)],
         states={
-            PHOTO: [MessageHandler(filters.PHOTO, handle_photo)],
-            DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_description)]
+            PHOTO: [MessageHandler(Filters.photo, handle_photo)],
+            DESCRIPTION: [MessageHandler(Filters.text & ~Filters.command, handle_description)]
         },
         fallbacks=[
             CommandHandler('cancel', cancel_command),
@@ -187,14 +191,18 @@ def main():
         ]
     )
     
-    app.add_handler(conv_handler)
-    app.add_handler(CommandHandler('help', help_command))
-    app.add_error_handler(error_handler)
+    dispatcher.add_handler(conv_handler)
+    dispatcher.add_handler(CommandHandler('help', help_command))
+    dispatcher.add_error_handler(error_handler)
     
-    logger.info("🤖 Бот запущен и готов принимать заявки на технику!")
+    logger.info("🤖 Бот запускается...")
     
     # Запускаем бота
-    app.run_polling()
+    updater.start_polling()
+    logger.info("✅ Бот запущен и готов принимать заявки на технику!")
+    
+    # Бесконечный цикл
+    updater.idle()
 
 if __name__ == "__main__":
     main()
