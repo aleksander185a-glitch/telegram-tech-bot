@@ -14,18 +14,24 @@ logger = logging.getLogger(__name__)
 # Получаем переменные окружения
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 ADMIN_CHAT_ID = os.environ.get('ADMIN_CHAT_ID')
-WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL')  # Render автоматически устанавливает эту переменную
+RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://telegram-tech-bot-oxzf.onrender.com')
 
 # Проверка переменных
-if not BOT_TOKEN or not ADMIN_CHAT_ID:
-    logger.error("❌ BOT_TOKEN или ADMIN_CHAT_ID не установлены")
+if not BOT_TOKEN:
+    logger.error("❌ BOT_TOKEN не установлен")
+    exit(1)
+if not ADMIN_CHAT_ID:
+    logger.error("❌ ADMIN_CHAT_ID не установлен")
     exit(1)
 
 logger.info("✅ Переменные окружения загружены")
+logger.info(f"BOT_TOKEN: {'установлен' if BOT_TOKEN else 'НЕТ'}")
+logger.info(f"ADMIN_CHAT_ID: {ADMIN_CHAT_ID}")
+logger.info(f"RENDER_EXTERNAL_URL: {RENDER_EXTERNAL_URL}")
 
 app = Flask(__name__)
 
-# Хранение временных данных (в памяти)
+# Хранение временных данных
 user_sessions = {}
 
 class TelegramBot:
@@ -34,64 +40,158 @@ class TelegramBot:
         self.base_url = f"https://api.telegram.org/bot{token}"
     
     def send_message(self, chat_id, text):
+        """Отправка сообщения с логированием"""
         url = f"{self.base_url}/sendMessage"
         data = {
             "chat_id": chat_id,
             "text": text,
             "parse_mode": "HTML"
         }
+        logger.info(f"📤 Отправка сообщения для {chat_id}: {text[:50]}...")
+        
         try:
             response = requests.post(url, json=data)
-            return response.json()
+            result = response.json()
+            logger.info(f"📨 Результат отправки: {result}")
+            return result
         except Exception as e:
-            logger.error(f"Ошибка отправки сообщения: {e}")
+            logger.error(f"❌ Ошибка отправки сообщения: {e}")
             return None
     
     def send_photo(self, chat_id, photo_url, caption=""):
+        """Отправка фото с логированием"""
         url = f"{self.base_url}/sendPhoto"
         data = {
             "chat_id": chat_id,
             "photo": photo_url,
             "caption": caption
         }
+        logger.info(f"📤 Отправка фото для {chat_id}")
+        
         try:
             response = requests.post(url, json=data)
-            return response.json()
+            result = response.json()
+            logger.info(f"🖼 Результат отправки фото: {result.get('ok', False)}")
+            return result
         except Exception as e:
-            logger.error(f"Ошибка отправки фото: {e}")
+            logger.error(f"❌ Ошибка отправки фото: {e}")
             return None
     
     def get_file(self, file_id):
+        """Получение файла с логированием"""
         url = f"{self.base_url}/getFile"
         data = {"file_id": file_id}
+        logger.info(f"📥 Получение файла: {file_id}")
+        
         try:
             response = requests.post(url, json=data)
             result = response.json()
             if result.get('ok'):
                 file_path = result['result']['file_path']
-                return f"https://api.telegram.org/file/bot{self.token}/{file_path}"
-            return None
+                file_url = f"https://api.telegram.org/file/bot{self.token}/{file_path}"
+                logger.info(f"✅ Файл получен: {file_url}")
+                return file_url
+            else:
+                logger.error(f"❌ Ошибка получения файла: {result}")
+                return None
         except Exception as e:
-            logger.error(f"Ошибка получения файла: {e}")
+            logger.error(f"❌ Ошибка получения файла: {e}")
+            return None
+
+    def set_webhook(self, webhook_url):
+        """Установка webhook"""
+        url = f"{self.base_url}/setWebhook"
+        data = {
+            "url": webhook_url,
+            "drop_pending_updates": True  # Очистить ожидающие обновления
+        }
+        
+        logger.info(f"🌐 Установка webhook: {webhook_url}")
+        
+        try:
+            response = requests.post(url, json=data, timeout=10)
+            result = response.json()
+            logger.info(f"✅ Результат установки webhook: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"❌ Ошибка установки webhook: {e}")
+            return None
+
+    def get_webhook_info(self):
+        """Получение информации о webhook"""
+        url = f"{self.base_url}/getWebhookInfo"
+        
+        try:
+            response = requests.get(url, timeout=10)
+            result = response.json()
+            logger.info(f"📊 Информация о webhook: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения информации о webhook: {e}")
             return None
 
 # Создаем экземпляр бота
 bot = TelegramBot(BOT_TOKEN)
 
+def setup_webhook():
+    """Автоматическая установка webhook при запуске"""
+    webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
+    logger.info(f"🔄 Настройка webhook для: {webhook_url}")
+    
+    # Получаем текущую информацию о webhook
+    webhook_info = bot.get_webhook_info()
+    
+    # Устанавливаем новый webhook
+    result = bot.set_webhook(webhook_url)
+    
+    if result and result.get('ok'):
+        logger.info("🎉 Webhook успешно установлен!")
+        # Отправляем уведомление администратору
+        bot.send_message(
+            ADMIN_CHAT_ID, 
+            f"🤖 Бот запущен!\n\n"
+            f"🌐 Webhook: {webhook_url}\n"
+            f"✅ Статус: Активен\n"
+            f"🕒 Время: {logging.Formatter().formatTime(logging.LogRecord('name', 'INFO', 'pathname', 'lineno', 'msg', 'args', 'exc_info'))}"
+        )
+        return True
+    else:
+        logger.error("❌ Не удалось установить webhook")
+        bot.send_message(
+            ADMIN_CHAT_ID,
+            f"❌ Ошибка установки webhook!\n\n"
+            f"URL: {webhook_url}\n"
+            f"Ошибка: {result}"
+        )
+        return False
+
 @app.route('/')
 def home():
-    return "🤖 Бот для покупки техники работает!"
+    return """
+🤖 Бот для покупки техники работает!
+
+Доступные endpoints:
+• / - эта страница
+• /webhook - прием сообщений от Telegram
+• /set_webhook - установка webhook
+• /webhook_info - информация о webhook
+• /test_admin - тест отправки сообщения
+• /health - проверка здоровья
+"""
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Обработка входящих сообщений от Telegram"""
     try:
         update = request.get_json()
+        logger.info(f"📨 Получено обновление от Telegram")
         
         if 'message' in update:
             message = update['message']
             chat_id = message['chat']['id']
             text = message.get('text', '')
+            
+            logger.info(f"💬 Сообщение от {chat_id}: {text}")
             
             # Обработка команды /start
             if text == '/start':
@@ -105,6 +205,7 @@ def webhook():
                 """
                 bot.send_message(chat_id, welcome_text)
                 user_sessions[chat_id] = {'state': 'waiting_photo'}
+                logger.info(f"🔄 Пользователь {chat_id} переведен в состояние waiting_photo")
             
             # Обработка фото
             elif 'photo' in message and user_sessions.get(chat_id, {}).get('state') == 'waiting_photo':
@@ -121,11 +222,14 @@ def webhook():
                 }
                 
                 bot.send_message(chat_id, "✅ Фото получено! Теперь опишите неисправность техники:")
+                logger.info(f"📸 Пользователь {chat_id} отправил фото, переведен в состояние waiting_description")
             
             # Обработка описания
             elif user_sessions.get(chat_id, {}).get('state') == 'waiting_description':
                 user_data = user_sessions[chat_id]
                 description = text
+                
+                logger.info(f"📝 Пользователь {chat_id} отправил описание: {description}")
                 
                 # Получаем URL фото
                 photo_url = bot.get_file(user_data['photo_file_id'])
@@ -138,11 +242,22 @@ def webhook():
 📱 Username: @{user_data['username']}
 📝 Описание неисправности: 
 {description}
+
+Chat ID пользователя: {chat_id}
                 """
                 
+                logger.info(f"📤 Отправка заявки администратору {ADMIN_CHAT_ID}")
+                
                 if photo_url:
-                    bot.send_photo(ADMIN_CHAT_ID, photo_url, admin_message)
+                    result = bot.send_photo(ADMIN_CHAT_ID, photo_url, admin_message)
+                    if result and result.get('ok'):
+                        logger.info("✅ Фото успешно отправлено администратору")
+                    else:
+                        logger.error("❌ Не удалось отправить фото администратору")
+                        # Пробуем отправить только текст
+                        bot.send_message(ADMIN_CHAT_ID, admin_message + "\n\n❌ Не удалось отправить фото")
                 else:
+                    logger.error("❌ Не удалось получить URL фото")
                     bot.send_message(ADMIN_CHAT_ID, admin_message + "\n\n❌ Не удалось загрузить фото")
                 
                 # Подтверждаем пользователю
@@ -150,6 +265,7 @@ def webhook():
                 
                 # Очищаем сессию
                 del user_sessions[chat_id]
+                logger.info(f"✅ Сессия пользователя {chat_id} завершена")
             
             # Обработка команды /help
             elif text == '/help':
@@ -176,26 +292,28 @@ def webhook():
         return 'OK'
     
     except Exception as e:
-        logger.error(f"Ошибка обработки webhook: {e}")
+        logger.error(f"❌ Ошибка обработки webhook: {e}")
         return 'ERROR'
 
 @app.route('/set_webhook', methods=['GET'])
-def set_webhook():
-    """Установка webhook (вызвать один раз после деплоя)"""
-    if not WEBHOOK_URL:
-        return "❌ WEBHOOK_URL не установлен"
-    
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
-    data = {
-        "url": f"{WEBHOOK_URL}/webhook"
-    }
-    
-    try:
-        response = requests.post(url, json=data)
-        result = response.json()
-        return f"Webhook установлен: {result}"
-    except Exception as e:
-        return f"Ошибка установки webhook: {e}"
+def set_webhook_manual():
+    """Ручная установка webhook"""
+    webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
+    result = bot.set_webhook(webhook_url)
+    return f"Webhook установлен вручную: {result}"
+
+@app.route('/webhook_info', methods=['GET'])
+def webhook_info():
+    """Информация о текущем webhook"""
+    info = bot.get_webhook_info()
+    return f"Информация о webhook: {info}"
+
+@app.route('/test_admin', methods=['GET'])
+def test_admin():
+    """Тестовая отправка сообщения администратору"""
+    test_message = "🧪 ТЕСТ: Бот работает корректно! Этот тест отправлен администратору."
+    result = bot.send_message(ADMIN_CHAT_ID, test_message)
+    return f"Тест отправлен: {result}"
 
 @app.route('/health')
 def health():
@@ -203,9 +321,16 @@ def health():
 
 def main():
     logger.info("🤖 Бот запускается...")
+    
+    # Автоматическая установка webhook при запуске
+    if setup_webhook():
+        logger.info("✅ Бот успешно запущен и настроен!")
+    else:
+        logger.error("❌ Бот запущен с ошибками настройки webhook")
+    
+    # Запуск Flask приложения
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
-    logger.info("✅ Бот запущен!")
 
 if __name__ == "__main__":
     main()
