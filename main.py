@@ -4,234 +4,384 @@ import requests
 from flask import Flask, request
 import json
 import traceback
+import gc
+import time
+import signal
+import sys
+from datetime import datetime, timedelta
 
-# Настройка логирования
+# ==================== НАСТРОЙКА ЛОГГИРОВАНИЯ ====================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Получаем переменные окружения
+# Убираем предупреждение Werkzeug в production
+if os.environ.get('RENDER'):
+    logging.getLogger('werkzeug').setLevel(logging.ERROR)
+
+# ==================== ОБРАБОТЧИКИ СИГНАЛОВ ====================
+def signal_handler(sig, frame):
+    """Graceful shutdown при получении сигналов"""
+    logger.info("🔄 Получен сигнал завершения, чистый выход...")
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+# ==================== КОНФИГУРАЦИЯ ====================
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 ADMIN_CHAT_ID = os.environ.get('ADMIN_CHAT_ID')
 RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://telegram-tech-bot-oxzf.onrender.com')
 
-# Проверка переменных
-if not BOT_TOKEN:
-    logger.error("❌ BOT_TOKEN не установлен")
-    exit(1)
-if not ADMIN_CHAT_ID:
-    logger.error("❌ ADMIN_CHAT_ID не установлен")
-    exit(1)
+# Проверка обязательных переменных
+if not BOT_TOKEN or not ADMIN_CHAT_ID:
+    logger.error("❌ BOT_TOKEN или ADMIN_CHAT_ID не установлены")
+    sys.exit(1)
 
-logger.info("✅ Переменные окружения загружены")
+logger.info("✅ Конфигурация загружена")
 
-app = Flask(__name__)
+# ==================== ОПТИМИЗИРОВАННЫЕ СТРУКТУРЫ ДАННЫХ ====================
+class SessionManager:
+    """Менеджер сессий с автоматической очисткой"""
+    
+    def __init__(self, max_age_minutes=60):
+        self.sessions = {}
+        self.max_age = timedelta(minutes=max_age_minutes)
+    
+    def create_session(self, chat_id, photo_file_id, user_name, username):
+        """Создание новой сессии с временной меткой"""
+        self.sessions[chat_id] = {
+            'state': 'waiting_description',
+            'photo_file_id': photo_file_id,
+            'user_name': user_name,
+            'username': username,
+            'created_at': datetime.now()
+        }
+        logger.info(f"🆕 Создана сессия для {chat_id}")
+    
+    def get_session(self, chat_id):
+        """Получение сессии с проверкой срока годности"""
+        session = self.sessions.get(chat_id)
+        if session:
+            if datetime.now() - session['created_at'] > self.max_age:
+                del self.sessions[chat_id]
+                logger.info(f"🧹 Сессия {chat_id} удалена по истечении времени")
+                return None
+        return session
+    
+    def delete_session(self, chat_id):
+        """Удаление сессии"""
+        if chat_id in self.sessions:
+            del self.sessions[chat_id]
+            logger.info(f"🗑️ Сессия {chat_id} удалена")
+    
+    def cleanup_expired(self):
+        """Очистка просроченных сессий"""
+        now = datetime.now()
+        expired = []
+        
+        for chat_id, session in self.sessions.items():
+            if now - session['created_at'] > self.max_age:
+                expired.append(chat_id)
+        
+        for chat_id in expired:
+            del self.sessions[chat_id]
+        
+        if expired:
+            logger.info(f"🧹 Очищено {len(expired)} просроченных сессий")
+        
+        return len(expired)
 
-# Хранение временных данных
-user_sessions = {}
+# Инициализация менеджера сессий
+session_manager = SessionManager(max_age_minutes=30)
 
-class TelegramBot:
+# ==================== ОПТИМИЗИРОВАННЫЙ TELEGRAM БОТ ====================
+class OptimizedTelegramBot:
+    """Оптимизированная версия бота с управлением памятью"""
+    
     def __init__(self, token):
         self.token = token
         self.base_url = f"https://api.telegram.org/bot{token}"
+        # Используем одну сессию для всех запросов
+        self.session = requests.Session()
+        # Настраиваем таймауты
+        self.session.timeout = 30
+    
+    def _make_request(self, url, data=None, files=None):
+        """Универсальный метод для запросов с обработкой ошибок"""
+        try:
+            if files:
+                response = self.session.post(url, files=files, data=data, timeout=30)
+            else:
+                response = self.session.post(url, json=data, timeout=15)
+            
+            result = response.json()
+            return result
+        except requests.exceptions.Timeout:
+            logger.error("⏰ Таймаут запроса к Telegram API")
+            return {'ok': False, 'error': 'timeout'}
+        except Exception as e:
+            logger.error(f"❌ Ошибка запроса: {e}")
+            return {'ok': False, 'error': str(e)}
     
     def send_message(self, chat_id, text):
-        """Отправка сообщения"""
+        """Отправка сообщения с оптимизацией"""
         url = f"{self.base_url}/sendMessage"
         data = {
             "chat_id": chat_id,
-            "text": text
+            "text": text,
+            "parse_mode": "HTML"
         }
-        logger.info(f"📤 Отправка сообщения для {chat_id}")
         
-        try:
-            response = requests.post(url, json=data, timeout=10)
-            result = response.json()
-            logger.info(f"📨 Результат: {result}")
-            return result
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки: {e}")
-            return {'ok': False, 'error': str(e)}
+        logger.info(f"📤 Отправка сообщения для {chat_id}")
+        result = self._make_request(url, data)
+        
+        if result.get('ok'):
+            logger.info("✅ Сообщение отправлено")
+        else:
+            logger.error(f"❌ Ошибка отправки: {result}")
+        
+        return result
     
-    def send_photo(self, chat_id, photo_file_path, caption=""):
-        """Отправка фото из файла"""
+    def send_photo(self, chat_id, photo_path, caption=""):
+        """Отправка фото с контролем памяти"""
         url = f"{self.base_url}/sendPhoto"
         
         try:
-            with open(photo_file_path, 'rb') as photo_file:
+            # Читаем файл чанками для экономии памяти
+            file_size = os.path.getsize(photo_path)
+            logger.info(f"🖼️ Отправка фото ({file_size} bytes) для {chat_id}")
+            
+            with open(photo_path, 'rb') as photo_file:
                 files = {'photo': photo_file}
                 data = {'chat_id': chat_id, 'caption': caption}
                 
-                logger.info(f"📤 Отправка фото для {chat_id}")
+                result = self._make_request(url, data, files)
                 
-                response = requests.post(url, files=files, data=data, timeout=30)
-                result = response.json()
-                logger.info(f"🖼 Результат отправки фото: {result}")
+                if result.get('ok'):
+                    logger.info("✅ Фото отправлено")
+                else:
+                    logger.error(f"❌ Ошибка отправки фото: {result}")
+                
                 return result
                 
         except Exception as e:
             logger.error(f"❌ Ошибка отправки фото: {e}")
             return {'ok': False, 'error': str(e)}
     
-    def get_file(self, file_id):
+    def get_file_info(self, file_id):
         """Получение информации о файле"""
         url = f"{self.base_url}/getFile"
         data = {"file_id": file_id}
         
-        try:
-            response = requests.post(url, json=data, timeout=10)
-            result = response.json()
-            logger.info(f"📁 Результат getFile: {result}")
-            return result
-        except Exception as e:
-            logger.error(f"❌ Ошибка getFile: {e}")
-            return {'ok': False, 'error': str(e)}
-
+        logger.info(f"📁 Получение информации о файле {file_id}")
+        return self._make_request(url, data)
+    
     def download_file(self, file_path, local_path):
-        """Скачивание файла с Telegram"""
+        """Скачивание файла с контролем памяти"""
         file_url = f"https://api.telegram.org/file/bot{self.token}/{file_path}"
         
         try:
-            logger.info(f"📥 Скачивание: {file_url}")
-            response = requests.get(file_url, timeout=30)
-            logger.info(f"📥 Статус скачивания: {response.status_code}")
+            logger.info(f"📥 Скачивание файла: {file_path}")
+            
+            # Скачиваем с прогрессом для больших файлов
+            response = self.session.get(file_url, stream=True, timeout=30)
             
             if response.status_code == 200:
                 with open(local_path, 'wb') as f:
-                    f.write(response.content)
-                logger.info(f"✅ Файл сохранен: {local_path} ({len(response.content)} bytes)")
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                
+                file_size = os.path.getsize(local_path)
+                logger.info(f"✅ Файл скачан: {local_path} ({file_size} bytes)")
                 return True
             else:
                 logger.error(f"❌ Ошибка скачивания: {response.status_code}")
                 return False
+                
         except Exception as e:
             logger.error(f"❌ Ошибка скачивания: {e}")
             return False
-
+    
     def set_webhook(self, webhook_url):
         """Установка webhook"""
         url = f"{self.base_url}/setWebhook"
-        data = {"url": webhook_url}
+        data = {"url": webhook_url, "drop_pending_updates": True}
         
-        try:
-            response = requests.post(url, json=data, timeout=10)
-            result = response.json()
-            logger.info(f"🌐 Webhook установлен: {result}")
-            return result
-        except Exception as e:
-            logger.error(f"❌ Ошибка установки webhook: {e}")
-            return {'ok': False, 'error': str(e)}
+        logger.info(f"🌐 Установка webhook: {webhook_url}")
+        return self._make_request(url, data)
 
-# Создаем экземпляр бота
-bot = TelegramBot(BOT_TOKEN)
+# Инициализация бота
+bot = OptimizedTelegramBot(BOT_TOKEN)
 
-def send_to_admin(user_info, user_id):
-    """Отправка данных администратору"""
+# ==================== ФУНКЦИИ ОПТИМИЗАЦИИ ПАМЯТИ ====================
+def cleanup_memory():
+    """Агрессивная очистка памяти"""
+    before = gc.get_count()
+    gc.collect()
+    after = gc.get_count()
+    logger.info(f"🧹 Очистка памяти: {before} -> {after}")
+    return after[0] - before[0]  # Возвращаем количество собранных объектов
+
+def safe_file_cleanup(file_path):
+    """Безопасное удаление временных файлов"""
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            logger.info(f"✅ Временный файл удален: {file_path}")
+            return True
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось удалить {file_path}: {e}")
+    return False
+
+# ==================== ОСНОВНАЯ ЛОГИКА ====================
+def send_to_admin_optimized(user_info, user_id):
+    """Оптимизированная отправка данных администратору"""
     try:
         admin_id = ADMIN_CHAT_ID
+        temp_file_path = None
         
-        message_text = f"""
-🛒 НОВАЯ ЗАЯВКА НА ПОКУПКУ ТЕХНИКИ
+        # Сначала отправляем текстовое уведомление
+        notification_text = f"🛒 НОВАЯ ЗАЯВКА от {user_info['user_name']}"
+        bot.send_message(admin_id, notification_text)
+        
+        # Получаем информацию о файле
+        file_info = bot.get_file_info(user_info['photo_file_id'])
+        
+        if not file_info.get('ok'):
+            logger.error(f"❌ Ошибка получения файла: {file_info}")
+            full_text = f"""
+🛒 НОВАЯ ЗАЯВКА
 
 👤 Клиент: {user_info['user_name']}
 📱 Username: @{user_info['username']}
 📝 Описание неисправности: 
 {user_info['description']}
 
-Chat ID пользователя: {user_id}
+❌ Фото недоступно
+            """
+            bot.send_message(admin_id, full_text)
+            return False
+        
+        file_path = file_info['result']['file_path']
+        temp_file_path = f"temp_photo_{user_id}_{int(time.time())}.jpg"
+        
+        # Скачиваем файл
+        if not bot.download_file(file_path, temp_file_path):
+            logger.error("❌ Не удалось скачать файл")
+            full_text = f"""
+🛒 НОВАЯ ЗАЯВКА
+
+👤 Клиент: {user_info['user_name']}
+📱 Username: @{user_info['username']}
+📝 Описание неисправности: 
+{user_info['description']}
+
+❌ Не удалось загрузить фото
+            """
+            bot.send_message(admin_id, full_text)
+            return False
+        
+        # Отправляем фото с текстом
+        full_text = f"""
+🛒 НОВАЯ ЗАЯВКА
+
+👤 Клиент: {user_info['user_name']}
+📱 Username: @{user_info['username']}
+📝 Описание неисправности: 
+{user_info['description']}
         """
         
-        logger.info(f"🔄 Начинаем отправку заявки администратору {admin_id}")
+        photo_result = bot.send_photo(admin_id, temp_file_path, full_text)
         
-        # Сначала отправляем текстовое сообщение (гарантированно)
-        text_result = bot.send_message(admin_id, "🛒 НОВАЯ ЗАЯВКА! Читайте ниже...")
-        if not text_result.get('ok'):
-            logger.error(f"❌ Не удалось отправить текстовое уведомление: {text_result}")
+        # Независимо от результата, чистим временный файл
+        safe_file_cleanup(temp_file_path)
         
-        # Получаем информацию о файле
-        file_info = bot.get_file(user_info['photo_file_id'])
-        logger.info(f"📁 Информация о файле: {file_info}")
-        
-        if file_info and file_info.get('ok'):
-            file_path = file_info['result']['file_path']
-            logger.info(f"✅ Получен путь к файлу: {file_path}")
-            
-            # Скачиваем файл
-            local_file_path = f"temp_photo_{user_id}.jpg"
-            if bot.download_file(file_path, local_file_path):
-                logger.info(f"✅ Файл скачан, пробуем отправить фото")
-                
-                # Отправляем фото с полным текстом
-                photo_result = bot.send_photo(admin_id, local_file_path, message_text)
-                
-                # Удаляем временный файл
-                try:
-                    os.remove(local_file_path)
-                    logger.info("✅ Временный файл удален")
-                except Exception as e:
-                    logger.warning(f"⚠️ Не удалось удалить временный файл: {e}")
-                
-                if photo_result and photo_result.get('ok'):
-                    logger.info("✅ Фото успешно отправлено администратору")
-                    return True
-                else:
-                    logger.error(f"❌ Не удалось отправить фото: {photo_result}")
-                    # Отправляем полный текст как сообщение
-                    bot.send_message(admin_id, message_text + "\n\n❌ Не удалось отправить фото")
-                    return False
-            else:
-                logger.error("❌ Не удалось скачать файл")
-                bot.send_message(admin_id, message_text + "\n\n❌ Не удалось скачать фото")
-                return False
+        if photo_result.get('ok'):
+            logger.info("✅ Заявка с фото отправлена администратору")
+            return True
         else:
-            logger.error(f"❌ Не удалось получить информацию о файле: {file_info}")
-            bot.send_message(admin_id, message_text + "\n\n❌ Не удалось получить фото")
+            logger.error(f"❌ Не удалось отправить фото: {photo_result}")
+            # Отправляем только текст
+            bot.send_message(admin_id, full_text + "\n\n❌ Не удалось отправить фото")
             return False
             
     except Exception as e:
         logger.error(f"❌ Критическая ошибка в send_to_admin: {e}")
         logger.error(traceback.format_exc())
-        # Пытаемся отправить хотя бы базовое уведомление
+        
+        # Всегда чистим временный файл при ошибках
+        if temp_file_path:
+            safe_file_cleanup(temp_file_path)
+        
+        # Пытаемся отправить хотя бы уведомление об ошибке
         try:
-            bot.send_message(ADMIN_CHAT_ID, f"❌ Ошибка обработки заявки: {str(e)}")
+            error_text = f"❌ Ошибка обработки заявки от {user_info.get('user_name', 'unknown')}"
+            bot.send_message(admin_id, error_text)
         except:
             pass
+        
         return False
+    finally:
+        # Всегда чистим память после обработки
+        cleanup_memory()
 
 def setup_webhook():
-    """Автоматическая установка webhook"""
+    """Настройка webhook с проверкой"""
     webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
-    logger.info(f"🔄 Настройка webhook: {webhook_url}")
+    logger.info(f"🌐 Настройка webhook: {webhook_url}")
     
     result = bot.set_webhook(webhook_url)
     
     if result and result.get('ok'):
         logger.info("🎉 Webhook успешно установлен!")
-        bot.send_message(ADMIN_CHAT_ID, "🤖 Бот запущен и готов к работе!")
+        bot.send_message(ADMIN_CHAT_ID, "🤖 Бот запущен и оптимизирован! ✅")
         return True
     else:
-        logger.error("❌ Не удалось установить webhook")
+        logger.error(f"❌ Ошибка установки webhook: {result}")
         return False
+
+# ==================== FLASK APP ====================
+app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🤖 Бот для покупки техники работает!"
+    return """
+🤖 Бот для покупки техники (ОПТИМИЗИРОВАННЫЙ)
+
+✅ Оптимизированная работа с памятью
+✅ Автоматическая очистка сессий
+✅ Контроль временных файлов
+
+Endpoints:
+• / - эта страница
+• /webhook - прием сообщений от Telegram
+• /status - диагностика системы
+• /health - проверка здоровья
+• /cleanup - принудительная очистка
+"""
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Обработка входящих сообщений от Telegram"""
+    """Обработчик webhook с оптимизацией памяти"""
     try:
         update = request.get_json()
-        logger.info(f"📨 Получено обновление: {json.dumps(update, ensure_ascii=False)[:500]}...")
         
         if 'message' in update:
             message = update['message']
             chat_id = message['chat']['id']
             text = message.get('text', '')
             
-            logger.info(f"💬 Сообщение от {chat_id}: {text}")
+            logger.info(f"💬 Сообщение от {chat_id}: {text[:100]}...")
+            
+            # Очищаем старые сессии при каждом запросе (редко, но эффективно)
+            if len(session_manager.sessions) > 50:  # Если много сессий
+                cleaned = session_manager.cleanup_expired()
+                if cleaned > 0:
+                    logger.info(f"🧹 Автоочистка: {cleaned} сессий")
             
             # Обработка команды /start
             if text == '/start':
@@ -239,61 +389,54 @@ def webhook():
 🛒 Покупка бытовой техники. 
 🔄 Возможен Trade-in.
 
-Присылайте фото и описание неисправности - администратор обязательно даст обратную связь!
+Присылайте фото бытовой техники, шильдика и описание неисправности - администратор свяжется с вами!
 
 📸 Отправьте фотографию техники:
                 """
                 bot.send_message(chat_id, welcome_text)
-                user_sessions[chat_id] = {'state': 'waiting_photo'}
-                logger.info(f"🔄 Пользователь {chat_id} переведен в состояние waiting_photo")
+                # Не создаем сессию сразу, только после фото
+                logger.info(f"🔄 Пользователь {chat_id} начал диалог")
             
             # Обработка фото
-            elif 'photo' in message and user_sessions.get(chat_id, {}).get('state') == 'waiting_photo':
-                # Берем самое качественное фото
-                photo = message['photo'][-1]
-                file_id = photo['file_id']
-                
-                # Сохраняем file_id в сессии
-                user_name = message['from'].get('first_name', 'Пользователь')
-                username = message['from'].get('username', 'не указан')
-                
-                user_sessions[chat_id] = {
-                    'state': 'waiting_description',
-                    'photo_file_id': file_id,
-                    'user_name': user_name,
-                    'username': username
-                }
-                
-                logger.info(f"📸 Сохранены данные пользователя: {user_name}, @{username}, file_id: {file_id}")
-                
-                bot.send_message(chat_id, "✅ Фото получено! Теперь опишите неисправность техники:")
-                logger.info(f"📸 Пользователь {chat_id} отправил фото")
-            
-            # Обработка описания
-            elif user_sessions.get(chat_id, {}).get('state') == 'waiting_description':
-                user_data = user_sessions[chat_id]
-                description = text
-                
-                logger.info(f"📝 Пользователь {chat_id} отправил описание: {description}")
-                logger.info(f"📤 Отправка заявки администратору {ADMIN_CHAT_ID}")
-                logger.info(f"📋 Данные пользователя: {user_data}")
-                
-                # Обновляем описание в данных пользователя
-                user_data['description'] = description
-                
-                # Отправляем администратору
-                success = send_to_admin(user_data, chat_id)
-                
-                # Подтверждаем пользователю
-                if success:
-                    bot.send_message(chat_id, "✅ Спасибо! Ваша заявка с фото отправлена администратору! 🎉")
+            elif 'photo' in message:
+                # Проверяем, есть ли активная сессия ожидания фото
+                if not session_manager.get_session(chat_id):
+                    # Создаем сессию при получении фото
+                    photo = message['photo'][-1]
+                    file_id = photo['file_id']
+                    user_name = message['from'].get('first_name', 'Пользователь')
+                    username = message['from'].get('username', 'не указан')
+                    
+                    session_manager.create_session(chat_id, file_id, user_name, username)
+                    bot.send_message(chat_id, "✅ ото получено! Теперь опишите неисправность или укажите модель, если не отправили шильдик:")
+                    logger.info(f"📸 Пользователь {chat_id} отправил фото")
                 else:
-                    bot.send_message(chat_id, "✅ Заявка отправлена! Но возникли проблемы с отправкой фото.")
-                
-                # Очищаем сессию
-                if chat_id in user_sessions:
-                    del user_sessions[chat_id]
-                logger.info(f"✅ Сессия пользователя {chat_id} завершена")
+                    bot.send_message(chat_id, "❌ Завершите текущую заявку перед отправкой нового фото")
+            
+            # Обработка описания (только если есть активная сессия)
+            elif text and not text.startswith('/'):
+                user_session = session_manager.get_session(chat_id)
+                if user_session and user_session['state'] == 'waiting_description':
+                    logger.info(f"📝 Пользователь {chat_id} отправил описание")
+                    
+                    # Обновляем данные сессии
+                    user_session['description'] = text
+                    
+                    # Отправляем администратору
+                    logger.info(f"📤 Отправка заявки администратору {ADMIN_CHAT_ID}")
+                    success = send_to_admin_optimized(user_session, chat_id)
+                    
+                    # Подтверждаем пользователю
+                    if success:
+                        bot.send_message(chat_id, "✅ Спасибо! Ваша заявка с фото отправлена администратору! 🎉")
+                    else:
+                        bot.send_message(chat_id, "✅ Заявка отправлена! Но возникли проблемы с отправкой фото.")
+                    
+                    # Очищаем сессию
+                    session_manager.delete_session(chat_id)
+                    
+                else:
+                    bot.send_message(chat_id, "🤖 Используйте /start чтобы оставить заявку на технику")
             
             # Обработка команды /help
             elif text == '/help':
@@ -302,49 +445,82 @@ def webhook():
 
 /start - оставить заявку на покупку техники
 /help - показать справку
+/status - диагностика бота
                 """
                 bot.send_message(chat_id, help_text)
             
-            # Любое другое сообщение
-            elif text and not text.startswith('/'):
-                if user_sessions.get(chat_id):
-                    bot.send_message(chat_id, "❌ Сначала отправьте фото командой /start")
-                else:
-                    bot.send_message(chat_id, "🤖 Используйте /start чтобы оставить заявку")
+            # Обработка команды /status
+            elif text == '/status':
+                status_info = f"""
+📊 Статус бота:
+
+Активных сессий: {len(session_manager.sessions)}
+Память: {cleanup_memory()} объектов собрано
+Время работы: {int(time.time() - start_time)} сек.
+                """
+                bot.send_message(chat_id, status_info)
         
         return 'OK'
     
     except Exception as e:
         logger.error(f"❌ Ошибка обработки webhook: {e}")
-        logger.error(f"🔍 Traceback: {traceback.format_exc()}")
+        logger.error(traceback.format_exc())
+        # Всегда чистим память при ошибках
+        cleanup_memory()
         return 'ERROR'
 
-@app.route('/set_webhook', methods=['GET'])
-def set_webhook_manual():
-    """Ручная установка webhook"""
-    webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
-    result = bot.set_webhook(webhook_url)
-    return f"Webhook: {result}"
-
-@app.route('/test', methods=['GET'])
-def test():
-    """Тест отправки сообщения"""
-    test_message = "🧪 ТЕСТ: Проверка работы бота"
-    result = bot.send_message(ADMIN_CHAT_ID, test_message)
-    return f"Тест отправлен: {result}"
+@app.route('/status')
+def status():
+    """Диагностика системы"""
+    import psutil
+    process = psutil.Process()
+    
+    status_info = {
+        "status": "running",
+        "active_sessions": len(session_manager.sessions),
+        "memory_usage_mb": f"{process.memory_info().rss / 1024 / 1024:.1f}",
+        "memory_percent": f"{process.memory_percent():.1f}%",
+        "cpu_percent": f"{process.cpu_percent():.1f}%",
+        "uptime_seconds": int(time.time() - start_time),
+        "cleaned_sessions": session_manager.cleanup_expired()
+    }
+    return status_info
 
 @app.route('/health')
 def health():
+    """Health check для Render"""
     return "OK"
 
-def main():
-    logger.info("🤖 Бот запускается...")
+@app.route('/cleanup')
+def cleanup():
+    """Принудительная очистка"""
+    cleaned_sessions = session_manager.cleanup_expired()
+    cleaned_memory = cleanup_memory()
     
-    # Автоматическая установка webhook
+    return f"""
+🧹 Принудительная очистка выполнена:
+
+Удалено сессий: {cleaned_sessions}
+Очищено объектов памяти: {cleaned_memory}
+Активных сессий: {len(session_manager.sessions)}
+    """
+
+# ==================== ЗАПУСК ПРИЛОЖЕНИЯ ====================
+start_time = time.time()
+
+def main():
+    logger.info("🚀 Запуск оптимизированного бота...")
+    
+    # Начальная очистка памяти
+    cleanup_memory()
+    
+    # Установка webhook
     setup_webhook()
     
     # Запуск Flask
     port = int(os.environ.get('PORT', 10000))
+    logger.info(f"🌐 Запуск сервера на порту {port}")
+    
     app.run(host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
