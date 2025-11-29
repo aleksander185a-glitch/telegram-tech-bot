@@ -3,6 +3,8 @@ import logging
 import requests
 from flask import Flask, request
 import json
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Настройка логирования
 logging.basicConfig(
@@ -34,10 +36,24 @@ app = Flask(__name__)
 # Хранение временных данных
 user_sessions = {}
 
+def create_session_with_retries():
+    """Создание сессии с повторными попытками"""
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
 class TelegramBot:
     def __init__(self, token):
         self.token = token
         self.base_url = f"https://api.telegram.org/bot{token}"
+        self.session = create_session_with_retries()
     
     def send_message(self, chat_id, text):
         """Отправка сообщения с логированием"""
@@ -50,31 +66,83 @@ class TelegramBot:
         logger.info(f"📤 Отправка сообщения для {chat_id}: {text[:50]}...")
         
         try:
-            response = requests.post(url, json=data)
+            response = self.session.post(url, json=data, timeout=10)
             result = response.json()
-            logger.info(f"📨 Результат отправки: {result}")
+            logger.info(f"📨 Результат отправки: {result.get('ok', False)}")
             return result
         except Exception as e:
             logger.error(f"❌ Ошибка отправки сообщения: {e}")
             return None
     
     def send_photo(self, chat_id, photo_url, caption=""):
-        """Отправка фото с логированием"""
+        """Улучшенная отправка фото через загрузку файла"""
         url = f"{self.base_url}/sendPhoto"
-        data = {
-            "chat_id": chat_id,
-            "photo": photo_url,
-            "caption": caption
-        }
-        logger.info(f"📤 Отправка фото для {chat_id}")
         
         try:
-            response = requests.post(url, json=data)
-            result = response.json()
+            # Скачиваем фото
+            logger.info(f"📥 Скачивание фото: {photo_url}")
+            response = self.session.get(photo_url, timeout=30)
+            if response.status_code != 200:
+                logger.error(f"❌ Не удалось скачать фото: {response.status_code}")
+                return None
+            
+            photo_data = response.content
+            logger.info(f"✅ Фото скачано, размер: {len(photo_data)} bytes")
+            
+            # Отправляем фото как файл
+            files = {'photo': ('photo.jpg', photo_data, 'image/jpeg')}
+            data = {
+                'chat_id': chat_id,
+                'caption': caption
+            }
+            
+            logger.info(f"📤 Отправка фото для {chat_id}")
+            
+            upload_response = self.session.post(url, files=files, data=data, timeout=30)
+            result = upload_response.json()
             logger.info(f"🖼 Результат отправки фото: {result.get('ok', False)}")
+            
+            if not result.get('ok'):
+                logger.error(f"❌ Ошибка отправки фото: {result}")
+            
             return result
+            
         except Exception as e:
             logger.error(f"❌ Ошибка отправки фото: {e}")
+            return None
+    
+    def send_document(self, chat_id, file_url, caption=""):
+        """Отправка файла как документа"""
+        url = f"{self.base_url}/sendDocument"
+        
+        try:
+            # Скачиваем файл
+            logger.info(f"📥 Скачивание документа: {file_url}")
+            response = self.session.get(file_url, timeout=30)
+            if response.status_code != 200:
+                logger.error(f"❌ Не удалось скачать документ: {response.status_code}")
+                return None
+            
+            file_data = response.content
+            logger.info(f"✅ Документ скачан, размер: {len(file_data)} bytes")
+            
+            # Отправляем как документ
+            files = {'document': ('photo.jpg', file_data, 'image/jpeg')}
+            data = {
+                'chat_id': chat_id,
+                'caption': caption
+            }
+            
+            logger.info(f"📤 Отправка документа для {chat_id}")
+            
+            upload_response = self.session.post(url, files=files, data=data, timeout=30)
+            result = upload_response.json()
+            logger.info(f"📎 Результат отправки документа: {result.get('ok', False)}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки документа: {e}")
             return None
     
     def get_file(self, file_id):
@@ -84,7 +152,7 @@ class TelegramBot:
         logger.info(f"📥 Получение файла: {file_id}")
         
         try:
-            response = requests.post(url, json=data)
+            response = self.session.post(url, json=data, timeout=10)
             result = response.json()
             if result.get('ok'):
                 file_path = result['result']['file_path']
@@ -103,15 +171,15 @@ class TelegramBot:
         url = f"{self.base_url}/setWebhook"
         data = {
             "url": webhook_url,
-            "drop_pending_updates": True  # Очистить ожидающие обновления
+            "drop_pending_updates": True
         }
         
         logger.info(f"🌐 Установка webhook: {webhook_url}")
         
         try:
-            response = requests.post(url, json=data, timeout=10)
+            response = self.session.post(url, json=data, timeout=10)
             result = response.json()
-            logger.info(f"✅ Результат установки webhook: {result}")
+            logger.info(f"✅ Результат установки webhook: {result.get('ok', False)}")
             return result
         except Exception as e:
             logger.error(f"❌ Ошибка установки webhook: {e}")
@@ -122,9 +190,9 @@ class TelegramBot:
         url = f"{self.base_url}/getWebhookInfo"
         
         try:
-            response = requests.get(url, timeout=10)
+            response = self.session.get(url, timeout=10)
             result = response.json()
-            logger.info(f"📊 Информация о webhook: {result}")
+            logger.info(f"📊 Информация о webhook: {result.get('ok', False)}")
             return result
         except Exception as e:
             logger.error(f"❌ Ошибка получения информации о webhook: {e}")
@@ -132,6 +200,59 @@ class TelegramBot:
 
 # Создаем экземпляр бота
 bot = TelegramBot(BOT_TOKEN)
+
+def send_to_admin(user_info, user_id):
+    """Улучшенная отправка данных администратору"""
+    admin_id = ADMIN_CHAT_ID
+    
+    message_text = f"""
+🛒 НОВАЯ ЗАЯВКА НА ПОКУПКУ ТЕХНИКИ
+
+👤 Клиент: {user_info['user_name']}
+📱 Username: @{user_info['username']}
+📝 Описание неисправности: 
+{user_info['description']}
+
+Chat ID пользователя: {user_id}
+    """
+    
+    try:
+        # Получаем URL фото
+        photo_url = bot.get_file(user_info['photo_file_id'])
+        
+        if not photo_url:
+            logger.error("❌ Не удалось получить URL фото")
+            bot.send_message(admin_id, message_text + "\n\n❌ Не удалось загрузить фото")
+            return False
+        
+        logger.info("🔄 Пробуем отправить фото...")
+        
+        # Пробуем отправить как фото
+        result_photo = bot.send_photo(admin_id, photo_url, message_text)
+        
+        if result_photo and result_photo.get('ok'):
+            logger.info("✅ Фото успешно отправлено администратору")
+            return True
+        else:
+            logger.warning("⚠️ Не удалось отправить фото, пробуем как документ...")
+            
+            # Пробуем отправить как документ
+            result_doc = bot.send_document(admin_id, photo_url, message_text)
+            
+            if result_doc and result_doc.get('ok'):
+                logger.info("✅ Фото отправлено как документ")
+                return True
+            else:
+                logger.error("❌ Не удалось отправить фото даже как документ")
+                # Отправляем только текст
+                bot.send_message(admin_id, message_text + "\n\n❌ Не удалось отправить вложение")
+                return False
+            
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка отправки: {e}")
+        # Всегда отправляем текст, даже если фото не отправилось
+        bot.send_message(admin_id, message_text + f"\n\n❌ Ошибка отправки вложения: {e}")
+        return False
 
 def setup_webhook():
     """Автоматическая установка webhook при запуске"""
@@ -149,20 +270,14 @@ def setup_webhook():
         # Отправляем уведомление администратору
         bot.send_message(
             ADMIN_CHAT_ID, 
-            f"🤖 Бот запущен!\n\n"
+            f"🤖 Бот запущен и настроен!\n\n"
             f"🌐 Webhook: {webhook_url}\n"
             f"✅ Статус: Активен\n"
-            f"🕒 Время: {logging.Formatter().formatTime(logging.LogRecord('name', 'INFO', 'pathname', 'lineno', 'msg', 'args', 'exc_info'))}"
+            f"📸 Отправка фото: Улучшенная"
         )
         return True
     else:
         logger.error("❌ Не удалось установить webhook")
-        bot.send_message(
-            ADMIN_CHAT_ID,
-            f"❌ Ошибка установки webhook!\n\n"
-            f"URL: {webhook_url}\n"
-            f"Ошибка: {result}"
-        )
         return False
 
 @app.route('/')
@@ -176,6 +291,7 @@ def home():
 • /set_webhook - установка webhook
 • /webhook_info - информация о webhook
 • /test_admin - тест отправки сообщения
+• /test_photo - тест отправки фото
 • /health - проверка здоровья
 """
 
@@ -230,35 +346,10 @@ def webhook():
                 description = text
                 
                 logger.info(f"📝 Пользователь {chat_id} отправил описание: {description}")
-                
-                # Получаем URL фото
-                photo_url = bot.get_file(user_data['photo_file_id'])
-                
-                # Отправляем администратору
-                admin_message = f"""
-🛒 НОВАЯ ЗАЯВКА НА ПОКУПКУ ТЕХНИКИ
-
-👤 Клиент: {user_data['user_name']}
-📱 Username: @{user_data['username']}
-📝 Описание неисправности: 
-{description}
-
-Chat ID пользователя: {chat_id}
-                """
-                
                 logger.info(f"📤 Отправка заявки администратору {ADMIN_CHAT_ID}")
                 
-                if photo_url:
-                    result = bot.send_photo(ADMIN_CHAT_ID, photo_url, admin_message)
-                    if result and result.get('ok'):
-                        logger.info("✅ Фото успешно отправлено администратору")
-                    else:
-                        logger.error("❌ Не удалось отправить фото администратору")
-                        # Пробуем отправить только текст
-                        bot.send_message(ADMIN_CHAT_ID, admin_message + "\n\n❌ Не удалось отправить фото")
-                else:
-                    logger.error("❌ Не удалось получить URL фото")
-                    bot.send_message(ADMIN_CHAT_ID, admin_message + "\n\n❌ Не удалось загрузить фото")
+                # Отправляем администратору
+                send_to_admin(user_data, chat_id)
                 
                 # Подтверждаем пользователю
                 bot.send_message(chat_id, "✅ Спасибо! Ваша заявка отправлена администратору! 🎉")
@@ -311,9 +402,25 @@ def webhook_info():
 @app.route('/test_admin', methods=['GET'])
 def test_admin():
     """Тестовая отправка сообщения администратору"""
-    test_message = "🧪 ТЕСТ: Бот работает корректно! Этот тест отправлен администратору."
+    test_message = "🧪 ТЕСТ: Бот работает корректно! Сообщение доставляется."
     result = bot.send_message(ADMIN_CHAT_ID, test_message)
     return f"Тест отправлен: {result}"
+
+@app.route('/test_photo', methods=['GET'])
+def test_photo():
+    """Тест отправки фото администратору"""
+    # Используем тестовое фото (можно заменить на любое доступное фото)
+    test_photo_url = "https://via.placeholder.com/400x300/0088cc/ffffff?text=Test+Photo"
+    test_caption = "🧪 ТЕСТОВОЕ ФОТО: Проверка отправки изображений"
+    
+    result = bot.send_photo(ADMIN_CHAT_ID, test_photo_url, test_caption)
+    
+    if result and result.get('ok'):
+        return f"✅ Тестовое фото отправлено: {result}"
+    else:
+        # Пробуем отправить как документ
+        result_doc = bot.send_document(ADMIN_CHAT_ID, test_photo_url, test_caption)
+        return f"📎 Тестовое фото отправлено как документ: {result_doc}"
 
 @app.route('/health')
 def health():
