@@ -445,7 +445,7 @@ def webhook():
 
 /start - оставить заявку на покупку техники
 /help - показать справку
-/status - диагностика бота
+#/status - диагностика бота
                 """
                 bot.send_message(chat_id, help_text)
             
