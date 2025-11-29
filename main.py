@@ -245,7 +245,7 @@ def send_to_admin_optimized(user_info, user_id):
         temp_file_path = None
         
         # Сначала отправляем текстовое уведомление
-        # notification_text = f"🛒 НОВАЯ ЗАЯВКА от {user_info['user_name']}"
+        notification_text = f"🛒 НОВАЯ ЗАЯВКА от {user_info['user_name']}"
         bot.send_message(admin_id, notification_text)
         
         # Получаем информацию о файле
@@ -408,7 +408,7 @@ def webhook():
                     username = message['from'].get('username', 'не указан')
                     
                     session_manager.create_session(chat_id, file_id, user_name, username)
-                    bot.send_message(chat_id, "✅ Фото получено! Теперь опишите неисправность или укажите модель с шильдика:")
+                    bot.send_message(chat_id, "✅ Фото получено! Теперь опишите неисправность и укажите модель с шильдика:")
                     logger.info(f"📸 Пользователь {chat_id} отправил фото")
                 else:
                     bot.send_message(chat_id, "❌ Завершите текущую заявку перед отправкой нового фото")
