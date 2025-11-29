@@ -1,7 +1,7 @@
 import os
 import logging
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, ConversationHandler, CallbackContext
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
 # Настройка логирования
 logging.basicConfig(
@@ -18,16 +18,21 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN')
 ADMIN_CHAT_ID = os.environ.get('ADMIN_CHAT_ID')
 
 # Проверка переменных
-if not BOT_TOKEN or not ADMIN_CHAT_ID:
-    logger.error("❌ BOT_TOKEN или ADMIN_CHAT_ID не установлены")
+if not BOT_TOKEN:
+    logger.error("❌ BOT_TOKEN не установлен")
+    exit(1)
+if not ADMIN_CHAT_ID:
+    logger.error("❌ ADMIN_CHAT_ID не установлен")
     exit(1)
 
 logger.info("✅ Переменные окружения загружены")
+logger.info(f"BOT_TOKEN: {'установлен' if BOT_TOKEN else 'НЕТ'}")
+logger.info(f"ADMIN_CHAT_ID: {ADMIN_CHAT_ID}")
 
 # Хранение временных данных
 user_data = {}
 
-def start_command(update: Update, context: CallbackContext):
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Начало работы - просим фото"""
     welcome_text = """
 🛒 Покупка бытовой техники. 
@@ -38,19 +43,19 @@ def start_command(update: Update, context: CallbackContext):
 📸 Теперь отправь мне фотографию техники:
     """
     
-    update.message.reply_text(welcome_text)
+    await update.message.reply_text(welcome_text)
     return PHOTO
 
-def handle_photo(update: Update, context: CallbackContext):
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка полученного фото"""
     user_id = update.message.from_user.id
     
     try:
         # Сохраняем фото (берем самое качественное)
-        photo_file = update.message.photo[-1].get_file()
+        photo_file = await update.message.photo[-1].get_file()
         user_data[user_id] = {'photo': photo_file}
         
-        update.message.reply_text(
+        await update.message.reply_text(
             "✅ Фото получено! Теперь опиши неисправность техники:\n\n"
             "• Какая модель?\n"
             "• Что случилось?\n"
@@ -59,16 +64,16 @@ def handle_photo(update: Update, context: CallbackContext):
         return DESCRIPTION
     except Exception as e:
         logger.error(f"Ошибка обработки фото: {e}")
-        update.message.reply_text("❌ Ошибка при обработке фото. Попробуйте еще раз: /start")
+        await update.message.reply_text("❌ Ошибка при обработке фото. Попробуйте еще раз: /start")
         return ConversationHandler.END
 
-def handle_description(update: Update, context: CallbackContext):
+async def handle_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка описания и отправка данных администратору"""
     user_id = update.message.from_user.id
     description = update.message.text
     
     if user_id not in user_data or 'photo' not in user_data[user_id]:
-        update.message.reply_text("❌ Сначала отправь фото! Напиши /start")
+        await update.message.reply_text("❌ Сначала отправь фото! Напиши /start")
         return ConversationHandler.END
     
     # Сохраняем описание и информацию о пользователе
@@ -78,9 +83,9 @@ def handle_description(update: Update, context: CallbackContext):
     
     try:
         # Отправляем данные администратору в Telegram
-        send_to_admin(update, context, user_id)
+        await send_to_admin(update, context, user_id)
         
-        update.message.reply_text(
+        await update.message.reply_text(
             "✅ Спасибо! Ваши фото и описание отправлены администратору! 🎉\n\n"
             "Мы свяжемся с вами в ближайшее время для обратной связи.\n\n"
             "Если хотите отправить еще одну заявку, напишите /start"
@@ -88,7 +93,7 @@ def handle_description(update: Update, context: CallbackContext):
         
     except Exception as e:
         logger.error(f"Ошибка отправки: {e}")
-        update.message.reply_text(
+        await update.message.reply_text(
             "❌ Произошла ошибка при отправке. Попробуйте еще раз: /start"
         )
     
@@ -98,7 +103,7 @@ def handle_description(update: Update, context: CallbackContext):
     
     return ConversationHandler.END
 
-def send_to_admin(update: Update, context: CallbackContext, user_id: int):
+async def send_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     """Отправка данных администратору в Telegram"""
     user_info = user_data[user_id]
     
@@ -117,11 +122,11 @@ def send_to_admin(update: Update, context: CallbackContext, user_id: int):
     try:
         # Скачиваем фото
         photo_path = f"temp_photo_{user_id}.jpg"
-        user_info['photo'].download(photo_path)
+        await user_info['photo'].download_to_drive(photo_path)
         
         # Отправляем фото и текст администратору
         with open(photo_path, 'rb') as photo:
-            context.bot.send_photo(
+            await context.bot.send_photo(
                 chat_id=int(ADMIN_CHAT_ID),
                 photo=photo,
                 caption=message_text
@@ -134,24 +139,24 @@ def send_to_admin(update: Update, context: CallbackContext, user_id: int):
     except Exception as e:
         logger.error(f"Ошибка отправки фото: {e}")
         # Отправляем хотя бы текст если фото не отправилось
-        context.bot.send_message(
+        await context.bot.send_message(
             chat_id=int(ADMIN_CHAT_ID),
             text=message_text + "\n\n❌ Не удалось отправить фото"
         )
 
-def cancel_command(update: Update, context: CallbackContext):
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отмена операции"""
     user_id = update.message.from_user.id
     if user_id in user_data:
         del user_data[user_id]
     
-    update.message.reply_text(
+    await update.message.reply_text(
         "❌ Заявка отменена.\n\n"
         "Если хотите оставить заявку на покупку техники, напишите /start"
     )
     return ConversationHandler.END
 
-def help_command(update: Update, context: CallbackContext):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда помощи"""
     help_text = """
 🤖 Помощь по боту:
@@ -167,42 +172,42 @@ def help_command(update: Update, context: CallbackContext):
 2. Описываете неисправность
 3. Администратор связывается с вами для оценки и обратной связи
     """
-    update.message.reply_text(help_text)
+    await update.message.reply_text(help_text)
 
-def error_handler(update: Update, context: CallbackContext):
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
     logger.error(f"Ошибка: {context.error}")
 
 def main():
-    # Создаем updater
-    updater = Updater(token=BOT_TOKEN, use_context=True)
-    dispatcher = updater.dispatcher
-    
-    # Создаем обработчик разговора
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start_command)],
-        states={
-            PHOTO: [MessageHandler(Filters.photo, handle_photo)],
-            DESCRIPTION: [MessageHandler(Filters.text & ~Filters.command, handle_description)]
-        },
-        fallbacks=[
-            CommandHandler('cancel', cancel_command),
-            CommandHandler('help', help_command)
-        ]
-    )
-    
-    dispatcher.add_handler(conv_handler)
-    dispatcher.add_handler(CommandHandler('help', help_command))
-    dispatcher.add_error_handler(error_handler)
-    
-    logger.info("🤖 Бот запускается...")
-    
-    # Запускаем бота
-    updater.start_polling()
-    logger.info("✅ Бот запущен и готов принимать заявки на технику!")
-    
-    # Бесконечный цикл
-    updater.idle()
+    try:
+        # Создаем приложение
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        # Создаем обработчик разговора
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler('start', start_command)],
+            states={
+                PHOTO: [MessageHandler(filters.PHOTO, handle_photo)],
+                DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_description)]
+            },
+            fallbacks=[
+                CommandHandler('cancel', cancel_command),
+                CommandHandler('help', help_command)
+            ]
+        )
+        
+        application.add_handler(conv_handler)
+        application.add_handler(CommandHandler('help', help_command))
+        application.add_error_handler(error_handler)
+        
+        logger.info("🤖 Бот запускается...")
+        
+        # Запускаем бота
+        application.run_polling()
+        
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка при запуске бота: {e}")
+        exit(1)
 
 if __name__ == "__main__":
     main()
