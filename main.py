@@ -1,0 +1,163 @@
+import os
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+
+PHOTO, DESCRIPTION = range(2)
+
+ADMIN_CHAT_ID = 840649836
+
+user_data = {}
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало работы - просим фото"""
+    welcome_text = """
+🛒 Покупка бытовой техники.
+📱  Ремонт бытовой техники.
+🔄 Возможен Trade-in.
+
+Присылайте фото бытовой техники, шильдика и описание неисправности - администратор свяжется с вами!
+
+📸 Теперь отправьте фотографию:
+    """
+
+    await update.message.reply_text(welcome_text)
+    return PHOTO
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка полученного фото"""
+    user_id = update.message.from_user.id
+
+    photo_file = await update.message.photo[-1].get_file()
+    user_data[user_id] = {'photo': photo_file}
+
+    await update.message.reply_text(
+        "✅ Фото получено! Теперь опишите неисправность или укажите модель, если не отправили шильдик:\n\n"
+    )
+    return DESCRIPTION
+
+
+async def handle_description(update: Update,
+                             context: ContextTypes.DEFAULT_TYPE):
+    """Обработка описания и отправка данных администратору"""
+    user_id = update.message.from_user.id
+    description = update.message.text
+
+    if user_id not in user_data or 'photo' not in user_data[user_id]:
+        await update.message.reply_text(
+            "❌ Сначала отправьте фото! Напишите /start")
+        return ConversationHandler.END
+
+    user_data[user_id]['description'] = description
+    user_data[user_id]['user_name'] = update.message.from_user.first_name
+    user_data[user_id]['username'] = update.message.from_user.username
+
+    try:
+        await send_to_admin(update, context, user_id)
+
+        await update.message.reply_text(
+            "✅ Спасибо! Ваши фото и описание отправлены администратору! 🎉\n\n"
+            "Мы свяжемся с вами в ближайшее время.\n\n"
+            "Если хотите отправить еще одну заявку, напишите /start")
+
+    except Exception as e:
+        await update.message.reply_text(
+            "❌ Произошла ошибка при отправке. Попробуйте еще раз: /start")
+        print(f"Ошибка: {e}")
+
+    if user_id in user_data:
+        del user_data[user_id]
+
+    return ConversationHandler.END
+
+
+async def send_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                        user_id: int):
+    """Отправка данных администратору в Telegram"""
+    user_info = user_data[user_id]
+
+    message_text = f"""
+🛒 НОВАЯ ЗАЯВКА 
+
+👤 Клиент: {user_info['user_name']}
+📱 Username: @{user_info['username'] if user_info['username'] else 'не указан'}
+📝 Описание неисправности: 
+{user_info['description']}
+
+    """
+
+    photo_path = f"temp_photo_{user_id}.jpg"
+    await user_info['photo'].download_to_drive(photo_path)
+
+    with open(photo_path, 'rb') as photo:
+        await context.bot.send_photo(chat_id=ADMIN_CHAT_ID,
+                                     photo=photo,
+                                     caption=message_text)
+
+    os.remove(photo_path)
+
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена операции"""
+    user_id = update.message.from_user.id
+    if user_id in user_data:
+        del user_data[user_id]
+
+    await update.message.reply_text(
+        "❌ Заявка отменена.\n\n"
+        "Если хотите оставить заявку на покупку техники, напишите /start")
+    return ConversationHandler.END
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда помощи"""
+    help_text = """
+🤖 Помощь по боту:
+
+🛒 Покупка бытовой техники с Trade-in
+
+/start - оставить заявку на покупку техники
+/help - показать эту справку  
+/cancel - отменить текущую заявку
+
+Как это работает:
+1. Отправляете фото техники
+2. Описываете неисправность
+3. Администратор связывается с вами
+    """
+    await update.message.reply_text(help_text)
+
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик ошибок"""
+    print(f"Ошибка: {context.error}")
+
+
+def main():
+    app = Application.builder().token(os.environ['BOT_TOKEN']).build()
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('start', start_command)],
+        states={
+            PHOTO: [MessageHandler(filters.PHOTO, handle_photo)],
+            DESCRIPTION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND,
+                               handle_description)
+            ]
+        },
+        fallbacks=[
+            CommandHandler('cancel', cancel_command),
+            CommandHandler('help', help_command)
+        ])
+
+    app.add_handler(conv_handler)
+    app.add_handler(CommandHandler('help', help_command))
+    app.add_error_handler(error_handler)
+
+    print("🤖 Бот запущен и готов принимать заявки !")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
